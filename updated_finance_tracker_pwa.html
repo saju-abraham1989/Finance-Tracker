@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>UK Finance Tracker — Updated</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap">
+    <style>
+        body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+        select option { color: black; } /* fix dropdown text */
+    </style>
+
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="apple-touch-icon" href="icon.png">
+
+</head>
+<body class="bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 min-h-screen p-6 text-white">
+
+<div id="app" class="max-w-7xl mx-auto"></div>
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+/* ------------------------------
+   Core app state and helpers
+   ------------------------------ */
+
+const salaryPayDate = 25;
+
+const incomeCategories = [
+    'Salary',
+    'Freelance/Side Hustle',
+    'Investment Income',
+    'Benefits',
+    'Bank Transfer (Received)',
+    'Bank Interest',
+    'Other Income'
+];
+
+const expenseCategories = [
+    'Rent/Mortgage', 'Council Tax', 'Electricity', 'Gas', 'Water', 'Internet/Broadband', 'Mobile Phone', 'TV License',
+    'Home Insurance', 'Contents Insurance', 'Groceries', 'Eating Out', 'Transport/Petrol', 'Car Insurance', 'Car Tax/MOT',
+    'Healthcare', 'Gym/Fitness', 'Entertainment', 'Subscriptions', 'Clothing', 'Education', 'Savings', 'Home Deposit',
+    'Transfer to Overseas', 'Other'
+];
+
+let activeTab = 'summary';
+let viewMode = 'monthly';
+
+let existingSavings = parseFloat(localStorage.getItem('existingSavings') || '0');
+let emergencySavings = parseFloat(localStorage.getItem('emergencySavings') || '0');
+let homeDepositGoal = parseFloat(localStorage.getItem('homeDepositGoal') || '0');
+
+let savingsGoals = JSON.parse(localStorage.getItem('savingsGoals') || '[]');
+let recurring = JSON.parse(localStorage.getItem('recurring') || '[]');
+let budgets = JSON.parse(localStorage.getItem('categoryBudgets') || '{}');
+
+let transactions = JSON.parse(localStorage.getItem('transactions') || '[]');
+
+let newTransaction = {
+    date: new Date().toISOString().split('T')[0],
+    description: '',
+    category: '',
+    amount: '',
+    type: 'expense'
+};
+
+function saveData() {
+    localStorage.setItem('transactions', JSON.stringify(transactions));
+    localStorage.setItem('existingSavings', existingSavings);
+    localStorage.setItem('emergencySavings', emergencySavings);
+    localStorage.setItem('homeDepositGoal', homeDepositGoal);
+    localStorage.setItem('savingsGoals', JSON.stringify(savingsGoals));
+    localStorage.setItem('recurring', JSON.stringify(recurring));
+    localStorage.setItem('categoryBudgets', JSON.stringify(budgets));
+}
+
+/* --- Calculations --- */
+function calculateTotals() {
+    const income = transactions.filter(t => t.type === 'income').reduce((s,t)=>s + parseFloat(t.amount || 0), 0);
+    const expenses = transactions.filter(t => t.type === 'expense').reduce((s,t)=>s + parseFloat(t.amount || 0), 0);
+    return { income, expenses, savings: income - expenses + existingSavings + emergencySavings + (savingsGoals.reduce((s,g)=>s+(g.saved||0),0)) };
+}
+
+function calculateHomeDepositProgress() {
+    // also include any savingsGoals named Home Deposit for safety
+    const fromTransactions = transactions.filter(t => t.category === 'Home Deposit').reduce((s,t)=>s + parseFloat(t.amount || 0), 0);
+    const fromGoals = (savingsGoals.find(g=>g.name && g.name.toLowerCase().includes('home deposit')) || {}).saved || 0;
+    return fromTransactions + (fromGoals || 0);
+}
+
+function getGroupedData() {
+    const grouped = {};
+    transactions.forEach(t => {
+        const key = viewMode === 'monthly' ? t.date.substring(0,7) : t.date.substring(0,4);
+        if(!grouped[key]) grouped[key] = { income:0, expenses:0 };
+        if(t.type === 'income') grouped[key].income += parseFloat(t.amount || 0);
+        else grouped[key].expenses += parseFloat(t.amount || 0);
+    });
+    return grouped;
+}
+
+/* --- Recurring apply (simple: if today's date matches rec day, add once) --- */
+function applyRecurringTransactions() {
+    const today = new Date();
+    // we mark created recurring using a flag stored in localStorage per-day to avoid duplication across reloads the same day
+    const markerKey = 'recurring_applied_' + today.toISOString().split('T')[0];
+    if(localStorage.getItem(markerKey)) return;
+    recurring.forEach(r => {
+        if(parseInt(r.day) === today.getDate()) {
+            transactions.push({
+                id: Date.now() + Math.floor(Math.random()*1000),
+                date: today.toISOString().split('T')[0],
+                description: 'Recurring - ' + r.category,
+                category: r.category,
+                amount: r.amount,
+                type: r.type || 'expense'
+            });
+        }
+    });
+    localStorage.setItem(markerKey, '1');
+    saveData();
+}
+applyRecurringTransactions();
+
+/* ------------------------------
+   Rendering
+   ------------------------------ */
+
+function setTab(tab) { activeTab = tab; renderSidebar(); }
+
+function setViewMode(mode) { viewMode = mode; render(); }
+
+function renderSidebar() {
+    const app = document.getElementById('app');
+    app.innerHTML = `
+        <div class="text-center mb-6">
+            <h1 class="text-4xl font-bold">UK Finance Tracker</h1>
+            <p class="text-purple-200">Manage income, expenses, and saving goals</p>
+        </div>
+
+        <div class="flex gap-6">
+            <aside class="w-64 bg-white/5 rounded-xl p-4 sticky top-4 h-[80vh] overflow-auto">
+                <h2 class="text-xl font-bold text-white mb-4">Finance</h2>
+                <nav class="space-y-2 text-purple-200">
+                    <button onclick="setTab('summary')" class="w-full text-left py-2 ${activeTab==='summary' ? 'bg-purple-600 text-white rounded-lg' : ''}">Summary</button>
+                    <button onclick="setTab('transactions')" class="w-full text-left py-2 ${activeTab==='transactions' ? 'bg-purple-600 text-white rounded-lg' : ''}">Transactions</button>
+                    <button onclick="setTab('goals')" class="w-full text-left py-2 ${activeTab==='goals' ? 'bg-purple-600 text-white rounded-lg' : ''}">Goals</button>
+                    <button onclick="setTab('calendar')" class="w-full text-left py-2 ${activeTab==='calendar' ? 'bg-purple-600 text-white rounded-lg' : ''}">Calendar</button>
+                </nav>
+
+                <div class="mt-6">
+                    <label class="text-sm text-purple-200">Existing Savings</label>
+                    <input id="existingSavingsInput" type="number" value="${existingSavings}" class="w-full mt-2 p-2 rounded-lg bg-white/10 text-white" />
+                    <button onclick="saveExistingSavings()" class="mt-2 w-full px-3 py-2 bg-purple-600 rounded-lg">Save</button>
+                </div>
+
+                <div class="mt-4">
+                    <label class="text-sm text-purple-200">Emergency Savings</label>
+                    <input id="emergencySavingsInput" type="number" value="${emergencySavings}" class="w-full mt-2 p-2 rounded-lg bg-white/10 text-white" />
+                    <button onclick="saveEmergencySavings()" class="mt-2 w-full px-3 py-2 bg-purple-600 rounded-lg">Save</button>
+                </div>
+
+            </aside>
+
+            <main class="flex-1" id="mainContent">
+                ${activeTab === 'summary' ? renderSummary() : (activeTab === 'transactions' ? renderTransactions() : (activeTab === 'goals' ? renderGoals() : renderTransactions()))}
+            </main>
+        </div>
+    `;
+    lucide.createIcons();
+}
+
+/* --- Save helpers bound to sidebar inputs --- */
+function saveExistingSavings() {
+    existingSavings = parseFloat(document.getElementById('existingSavingsInput').value) || 0;
+    saveData(); render();
+}
+function saveEmergencySavings() {
+    emergencySavings = parseFloat(document.getElementById('emergencySavingsInput').value) || 0;
+    saveData(); render();
+}
+
+/* --- Summary renderer --- */
+function renderSummary() {
+    const totals = calculateTotals();
+    const grouped = getGroupedData();
+    const homeSaved = calculateHomeDepositProgress();
+    const remaining = Math.max(homeDepositGoal - homeSaved, 0);
+
+    // Compose savings goals html
+    const goalsHtml = (savingsGoals && savingsGoals.length > 0) ? savingsGoals.map(g => {
+        const pct = g.target ? Math.min((g.saved||0) / g.target * 100, 100) : 0;
+        return `
+            <div class="bg-white/5 p-4 rounded-lg border border-white/10">
+                <div class="flex justify-between items-baseline">
+                    <div>
+                        <div class="text-white font-semibold">${escapeHtml(g.name)}</div>
+                        <div class="text-purple-200 text-sm">Target: £${(g.target||0).toFixed(2)}</div>
+                    </div>
+                    <div class="text-white text-2xl font-bold">£${(g.saved||0).toFixed(2)}</div>
+                </div>
+                <div class="w-full bg-white/20 h-3 rounded-full mt-3">
+                    <div class="h-3 bg-green-500 rounded-full" style="width:${pct}%"></div>
+                </div>
+            </div>
+        `;
+    }).join('') : '<div class="text-purple-200">No extra savings pots yet. Go to Goals to add some.</div>';
+
+    // Upcoming recurring
+    const recurringHtml = (recurring && recurring.length > 0) ? recurring.map(r => `
+        <div class="flex justify-between border-b border-white/10 py-2">
+            <div>${escapeHtml(r.category)}</div>
+            <div class="text-purple-200">£${parseFloat(r.amount||0).toFixed(2)} on ${r.day}th</div>
+        </div>
+    `).join('') : '<p class="text-purple-200">No recurring payments set</p>';
+
+    return `
+        <div>
+            <div class="text-sm opacity-70 mb-4">Salary usually arrives on the <strong>${salaryPayDate}th</strong> each month.</div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                <div class="bg-gradient-to-br from-green-500 to-emerald-600 rounded-2xl p-6 text-white shadow-2xl">
+                    <div class="text-sm opacity-80">Total Income</div>
+                    <div class="text-3xl font-bold">£${totals.income.toFixed(2)}</div>
+                </div>
+
+                <div class="bg-gradient-to-br from-red-500 to-pink-600 rounded-2xl p-6 text-white shadow-2xl">
+                    <div class="text-sm opacity-80">Total Expenses</div>
+                    <div class="text-3xl font-bold">£${totals.expenses.toFixed(2)}</div>
+                </div>
+
+                <div class="bg-gradient-to-br from-blue-500 to-cyan-600 rounded-2xl p-6 text-white shadow-2xl">
+                    <div class="text-sm opacity-80">Total Savings</div>
+                    <div class="text-3xl font-bold">£${totals.savings.toFixed(2)}</div>
+                </div>
+            </div>
+
+            <!-- Savings cards -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                <div class="bg-white/10 p-4 rounded-xl text-white">
+                    <h3 class="font-bold text-lg mb-1">Emergency Savings</h3>
+                    <p class="text-3xl font-bold">£${(emergencySavings||0).toFixed(2)}</p>
+                </div>
+
+                <div class="bg-white/10 p-4 rounded-xl text-white">
+                    <h3 class="font-bold text-lg mb-1">House Deposit Saved</h3>
+                    <p class="text-3xl font-bold">£${homeSaved.toFixed(2)}</p>
+                </div>
+
+                <div class="bg-white/10 p-4 rounded-xl text-white">
+                    <h3 class="font-bold text-lg mb-1">Existing Savings</h3>
+                    <p class="text-3xl font-bold">£${(existingSavings||0).toFixed(2)}</p>
+                </div>
+            </div>
+
+            <!-- Quick Add Savings Pot (Option A) -->
+            <div class="bg-white/10 p-6 rounded-xl mb-6">
+                <h3 class="text-xl font-bold mb-3">Quick Add Savings Pot</h3>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <input id="quickGoalName" placeholder="Name (e.g., Car Fund)" class="p-2 bg-white/10 rounded-lg text-white" />
+                    <input id="quickGoalTarget" type="number" placeholder="Target £" class="p-2 bg-white/10 rounded-lg text-white" />
+                    <input id="quickGoalSaved" type="number" placeholder="Saved £" class="p-2 bg-white/10 rounded-lg text-white" />
+                </div>
+                <div class="mt-3">
+                    <button onclick="addGoalFromQuickForm()" class="px-4 py-2 bg-green-600 rounded-lg">Add Pot</button>
+                </div>
+            </div>
+
+            <!-- Savings Pots Grid -->
+            <div class="bg-white/10 p-6 rounded-xl mb-6">
+                <h3 class="text-xl font-bold mb-4">Savings Pots</h3>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    ${goalsHtml}
+                </div>
+            </div>
+
+            <!-- Home Deposit Goal panel -->
+            <div class="bg-white/10 p-6 rounded-xl mb-6">
+                <h3 class="text-xl font-bold mb-3">Home Deposit Goal</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="text-sm text-purple-200">Set Goal (£):</label>
+                        <input id="homeDepositGoalInput" type="number" value="${homeDepositGoal}" class="w-full mt-2 p-2 rounded-lg bg-white/10 text-white" />
+                        <button onclick="saveHomeDepositGoal()" class="mt-3 px-4 py-2 bg-purple-600 rounded-lg">Save Goal</button>
+                    </div>
+                    <div class="text-white">
+                        <p><strong>Saved:</strong> £${homeSaved.toFixed(2)}</p>
+                        <p><strong>Remaining:</strong> £${remaining.toFixed(2)}</p>
+                    </div>
+                </div>
+                <div class="w-full bg-white/20 h-3 rounded-full mt-4">
+                    <div class="h-3 bg-green-500 rounded-full" style="width:${homeDepositGoal? Math.min(homeSaved/homeDepositGoal*100,100):0}%"></div>
+                </div>
+            </div>
+
+            <!-- Upcoming Recurring Bills -->
+            <div class="bg-white/10 p-6 rounded-xl">
+                <h3 class="text-xl font-bold mb-3">Upcoming Recurring Bills</h3>
+                ${recurringHtml}
+            </div>
+
+        </div>
+    `;
+}
+
+/* --- Transactions renderer --- */
+function renderTransactions() {
+    // Build add transaction form and table
+    return `
+        <div>
+            <div class="bg-white/10 rounded-2xl p-6 mb-6">
+                <h2 class="text-2xl font-bold mb-4">Add New Transaction</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+                    <input type="date" id="date" value="${newTransaction.date}" class="px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white" />
+
+                    <select id="type" class="px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white">
+                        <option value="income" ${newTransaction.type === 'income' ? 'selected' : ''}>Income</option>
+                        <option value="expense" ${newTransaction.type === 'expense' ? 'selected' : ''}>Expense</option>
+                    </select>
+
+                    <select id="category" class="px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white">
+                        <option value="">Select Category</option>
+                        ${(newTransaction.type === 'income' ? incomeCategories : expenseCategories).map(cat => `<option value="${cat}">${cat}</option>`).join('')}
+                    </select>
+
+                    <input id="description" type="text" placeholder="Description" class="px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white" />
+
+                    <div class="flex gap-2">
+                        <input id="amount" type="number" placeholder="Amount" step="0.01" class="flex-1 px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white" />
+                        <button onclick="addTransaction()" class="px-6 py-3 bg-purple-600 text-white rounded-lg font-semibold">Add</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white/10 rounded-2xl p-6">
+                <h2 class="text-2xl font-bold mb-4">Transaction History</h2>
+                <table class="w-full text-white">
+                    <thead>
+                        <tr class="border-b border-white/20">
+                            <th class="py-2 text-left">Date</th>
+                            <th class="py-2 text-left">Description</th>
+                            <th class="py-2 text-left">Category</th>
+                            <th class="py-2 text-left">Type</th>
+                            <th class="py-2 text-right">Amount</th>
+                            <th class="py-2 text-right">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${transactions.slice().sort((a,b)=>new Date(b.date)-new Date(a.date)).map(t => `
+                            <tr class="border-b border-white/10">
+                                <td class="py-2">${new Date(t.date).toLocaleDateString('en-GB')}</td>
+                                <td class="py-2">${escapeHtml(t.description || '')}</td>
+                                <td class="py-2 text-purple-200">${escapeHtml(t.category || '')}</td>
+                                <td class="py-2">${t.type}</td>
+                                <td class="py-2 text-right ${t.type === 'income' ? 'text-green-400' : 'text-red-400'}">£${parseFloat(t.amount||0).toFixed(2)}</td>
+                                <td class="py-2 text-right">
+                                    <button onclick="editTransaction(${t.id})" class="px-3 py-1 bg-yellow-600 rounded-lg text-white mr-2">Edit</button>
+                                    <button onclick="deleteTransactionEnhanced(${t.id})" class="px-3 py-1 bg-red-600 rounded-lg text-white">Delete</button>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
+}
+
+/* --- Goals renderer (for Goals tab) --- */
+function renderGoals() {
+    // Goals tab content is injected by renderSidebar into mainContent
+    const html = `
+        <div class="bg-white/10 p-6 rounded-xl mb-6">
+            <h2 class="text-2xl font-bold mb-4">Goals</h2>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="p-4 bg-white/5 rounded-lg">
+                    <h3 class="text-white font-semibold mb-2">Create / Add Goal</h3>
+                    <div class="grid grid-cols-1 gap-2">
+                        <input id="goalName" placeholder="Goal name (e.g., Car Fund)" class="p-2 bg-white/10 rounded-lg text-white" />
+                        <input id="goalTarget" type="number" placeholder="Target amount £" class="p-2 bg-white/10 rounded-lg text-white" />
+                        <input id="goalSaved" type="number" placeholder="Saved so far £" class="p-2 bg-white/10 rounded-lg text-white" />
+                        <div class="flex gap-2 mt-2">
+                            <button onclick="addGoal()" class="px-4 py-2 bg-green-600 rounded-lg text-white">Add Goal</button>
+                            <button onclick="saveAllGoalsEdits()" class="px-4 py-2 bg-purple-600 rounded-lg text-white">Save Changes</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="p-4 bg-white/5 rounded-lg">
+                    <h3 class="text-white font-semibold mb-2">Existing Goals</h3>
+                    <div id="goalsList">
+                        ${(savingsGoals && savingsGoals.length > 0) ? savingsGoals.map(g => `
+                            <div class="p-3 bg-white/10 rounded-lg mb-2 flex justify-between items-center">
+                                <div>
+                                    <div class="text-white font-semibold">${escapeHtml(g.name)}</div>
+                                    <div class="text-purple-200 text-sm">Saved: £${(g.saved||0).toFixed(2)} / £${(g.target||0).toFixed(2)}</div>
+                                </div>
+                                <div class="flex gap-2">
+                                    <button onclick="showEditGoal(${g.id})" class="px-3 py-1 bg-yellow-600 rounded-lg text-white text-sm">Edit</button>
+                                    <button onclick="deleteGoal(${g.id})" class="px-3 py-1 bg-red-600 rounded-lg text-white text-sm">Delete</button>
+                                </div>
+                            </div>
+                        `).join('') : `<div class="text-purple-200">No goals yet.</div>`}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    return html;
+}
+
+/* ------------------------------
+   Actions
+   ------------------------------ */
+
+function addTransaction() {
+    const date = document.getElementById('date').value;
+    const type = document.getElementById('type').value;
+    const category = document.getElementById('category').value;
+    const description = document.getElementById('description').value;
+    const amount = parseFloat(document.getElementById('amount').value || 0);
+
+    if(!date || !category || !description || !amount) {
+        alert('Please fill date, category, description and amount.');
+        return;
+    }
+    transactions.push({ id: Date.now() + Math.floor(Math.random()*1000), date, description, category, amount, type });
+    saveData();
+    render();
+}
+
+function deleteTransactionEnhanced(id) {
+    if(!confirm('Delete this transaction?')) return;
+    transactions = transactions.filter(t => t.id !== id);
+    saveData();
+    render();
+}
+
+/* --- Edit transaction modal --- */
+function editTransaction(id) {
+    const t = transactions.find(x => x.id === id);
+    if(!t) return alert('Transaction not found.');
+
+    // create modal if not exists
+    if(!document.getElementById('txModal')) {
+        const modal = document.createElement('div');
+        modal.id = 'txModal';
+        modal.className = 'fixed inset-0 flex items-center justify-center bg-black/60 p-4';
+        modal.innerHTML = `
+            <div class="bg-white/5 p-6 rounded-lg w-full max-w-md text-white">
+                <h3 class="text-xl font-bold mb-3">Edit Transaction</h3>
+                <label class="text-sm">Date</label>
+                <input id="editDate" type="date" class="w-full p-2 rounded-lg bg-white/10 mb-2 text-white" />
+                <label class="text-sm">Description</label>
+                <input id="editDesc" class="w-full p-2 rounded-lg bg-white/10 mb-2 text-white" />
+                <label class="text-sm">Type</label>
+                <select id="editType" class="w-full p-2 rounded-lg bg-white/10 mb-2 text-white">
+                    <option value="income">Income</option>
+                    <option value="expense">Expense</option>
+                </select>
+                <label class="text-sm">Category</label>
+                <select id="editCat" class="w-full p-2 rounded-lg bg-white/10 mb-2 text-white"></select>
+                <label class="text-sm">Amount</label>
+                <input id="editAmt" type="number" class="w-full p-2 rounded-lg bg-white/10 mb-4 text-white" />
+                <div class="flex justify-end gap-2">
+                    <button id="saveTxBtn" class="px-4 py-2 bg-green-600 rounded-lg">Save</button>
+                    <button id="cancelTxBtn" class="px-4 py-2 bg-red-600 rounded-lg">Cancel</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        document.getElementById('cancelTxBtn').addEventListener('click', () => {
+            const m = document.getElementById('txModal'); if(m) m.remove();
+        });
+    }
+
+    document.getElementById('editDate').value = t.date;
+    document.getElementById('editDesc').value = t.description;
+    document.getElementById('editType').value = t.type;
+    document.getElementById('editAmt').value = t.amount;
+
+    const catSelect = document.getElementById('editCat');
+    catSelect.innerHTML = '<option value="">Select</option>';
+    const cats = t.type === 'income' ? incomeCategories : expenseCategories;
+    cats.forEach(c => {
+        const o = document.createElement('option');
+        o.value = c; o.text = c;
+        if(c === t.category) o.selected = true;
+        catSelect.appendChild(o);
+    });
+
+    // handle type change
+    document.getElementById('editType').onchange = function() {
+        const cats2 = this.value === 'income' ? incomeCategories : expenseCategories;
+        catSelect.innerHTML = '<option value="">Select</option>';
+        cats2.forEach(c => {
+            const o = document.createElement('option'); o.value = c; o.text = c;
+            catSelect.appendChild(o);
+        });
+    };
+
+    document.getElementById('saveTxBtn').onclick = function() {
+        t.date = document.getElementById('editDate').value;
+        t.description = document.getElementById('editDesc').value;
+        t.type = document.getElementById('editType').value;
+        t.category = document.getElementById('editCat').value;
+        t.amount = parseFloat(document.getElementById('editAmt').value || 0);
+        saveData();
+        const m = document.getElementById('txModal'); if(m) m.remove();
+        render();
+    };
+}
+
+/* ------------------------------
+   Goals actions
+   ------------------------------ */
+function addGoal() {
+    const name = document.getElementById('goalName').value.trim();
+    const target = parseFloat(document.getElementById('goalTarget').value || 0);
+    const saved = parseFloat(document.getElementById('goalSaved').value || 0);
+    if(!name) return alert('Enter a goal name');
+    savingsGoals.push({ id: Date.now() + Math.floor(Math.random()*1000), name, target, saved });
+    saveData(); render();
+}
+
+function addGoalFromQuickForm() {
+    const name = document.getElementById('quickGoalName').value.trim();
+    const target = parseFloat(document.getElementById('quickGoalTarget').value || 0);
+    const saved = parseFloat(document.getElementById('quickGoalSaved').value || 0);
+    if(!name) return alert('Enter a name for the savings pot');
+    savingsGoals.push({ id: Date.now() + Math.floor(Math.random()*1000), name, target, saved });
+    saveData(); render();
+}
+
+function showEditGoal(id) {
+    const g = savingsGoals.find(x => x.id === id);
+    if(!g) return alert('Goal not found');
+    const name = prompt('Edit goal name', g.name);
+    if(name === null) return;
+    const target = parseFloat(prompt('Edit target amount', g.target) || g.target);
+    const saved = parseFloat(prompt('Edit saved amount', g.saved) || g.saved);
+    g.name = name; g.target = target; g.saved = saved;
+    saveData(); render();
+}
+function deleteGoal(id) {
+    if(!confirm('Delete this goal?')) return;
+    savingsGoals = savingsGoals.filter(x => x.id !== id);
+    saveData(); render();
+}
+function saveAllGoalsEdits() { saveData(); alert('Goals saved'); }
+
+/* Home deposit goal saver */
+function saveHomeDepositGoal() {
+    homeDepositGoal = parseFloat(document.getElementById('homeDepositGoalInput').value || 0);
+    saveData(); render();
+}
+
+/* ------------------------------
+   Utilities & Rendering orchestration
+   ------------------------------ */
+
+function escapeHtml(unsafe) {
+    if(!unsafe) return '';
+    return unsafe.replace(/[&<"']/g, function(m) { return ({'&':'&amp;','<':'&lt;','"':'&quot;',"'":"&#039;"}[m]); });
+}
+
+function renderChartsAndExtras() {
+    // small income/expense chart
+    const chartContainer = document.getElementById('chartsSection');
+    if(!chartContainer) return;
+    // destroy existing canvases first
+    chartContainer.innerHTML = `
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
+            <div class="bg-white/5 p-4 rounded-xl">
+                <h4 class="text-white font-semibold mb-2">Income vs Expenses (${viewMode})</h4>
+                <canvas id="ieChart"></canvas>
+            </div>
+            <div class="bg-white/5 p-4 rounded-xl">
+                <h4 class="text-white font-semibold mb-2">Savings Pots Overview</h4>
+                <canvas id="potsChart"></canvas>
+            </div>
+        </div>
+    `;
+
+    const grouped = getGroupedData();
+    const labels = Object.keys(grouped).sort();
+    const incomeData = labels.map(l => grouped[l].income);
+    const expensesData = labels.map(l => grouped[l].expenses);
+
+    try { // income/expense chart
+        const ctx1 = document.getElementById('ieChart');
+        if(ctx1) new Chart(ctx1, { type: 'line', data: { labels, datasets: [{ label:'Income', data:incomeData, borderWidth:2 }, { label:'Expenses', data:expensesData, borderWidth:2 }] }, options: { scales: { y:{ beginAtZero:true } } } });
+    } catch(e){}
+
+    try { // pots chart
+        const potLabels = savingsGoals.map(g=>g.name);
+        const potData = savingsGoals.map(g=>g.saved || 0);
+        const ctx2 = document.getElementById('potsChart');
+        if(ctx2) new Chart(ctx2, { type: 'doughnut', data: { labels:potLabels, datasets:[{ data: potData }] } });
+    } catch(e){}
+}
+
+function render() {
+    renderSidebar();
+    // attach event listeners for transactions tab inputs after small delay so DOM exists
+    setTimeout(()=> {
+        if(activeTab === 'transactions') {
+            const dateEl = document.getElementById('date');
+            if(dateEl) dateEl.addEventListener('change', e => newTransaction.date = e.target.value);
+            const typeEl = document.getElementById('type');
+            if(typeEl) {
+                typeEl.addEventListener('change', e => {
+                    newTransaction.type = e.target.value;
+                    // re-render so category options update
+                    render();
+                });
+            }
+            const catEl = document.getElementById('category');
+            if(catEl) catEl.addEventListener('change', e => newTransaction.category = e.target.value);
+            const descEl = document.getElementById('description');
+            if(descEl) descEl.addEventListener('input', e => newTransaction.description = e.target.value);
+            const amtEl = document.getElementById('amount');
+            if(amtEl) amtEl.addEventListener('input', e => newTransaction.amount = e.target.value);
+        }
+        // if mainContent contains charts section, render charts
+        const mc = document.getElementById('mainContent');
+        if(mc) {
+            const cs = document.getElementById('chartsSection');
+            if(!cs) {
+                const div = document.createElement('div');
+                div.id = 'chartsSection';
+                mc.appendChild(div);
+            }
+            renderChartsAndExtras();
+        }
+
+        // If in Goals tab, ensure Goals UI placed inside mainContent
+        if(activeTab === 'goals') {
+            const mc = document.getElementById('mainContent');
+            if(mc) mc.innerHTML = renderGoals();
+        }
+    }, 150);
+}
+
+/* Bootstrap initial render */
+render();
+
+</script>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('service-worker.js')
+            .then(function(registration) {
+                console.log('Service Worker registered with scope:', registration.scope);
+            }).catch(function(error) {
+                console.log('Service Worker registration failed:', error);
+            });
+        }
+    </script>
+
+</body>
+</html>
