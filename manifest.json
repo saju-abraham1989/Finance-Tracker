@@ -1,7 +1,7 @@
 {
     "name": "Finance Tracker",
     "short_name": "Finance",
-    "start_url": "./finance_tracker_pwa.html",
+    "start_url": "./finance_tracker.html",
     "display": "standalone",
     "background_color": "#ffffff",
     "theme_color": "#ffffff",
