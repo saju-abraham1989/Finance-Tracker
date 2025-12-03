@@ -3,7 +3,7 @@ self.addEventListener('install', function(event) {
     event.waitUntil(
         caches.open('finance-cache').then(function(cache) {
             return cache.addAll([
-                './updated_finance_tracker_pwa.html',
+                './finance_tracker.html',
                 './manifest.json'
             ]);
         })
