@@ -615,14 +615,36 @@ function render() {
         if(activeTab === 'transactions') {
             const dateEl = document.getElementById('date');
             if(dateEl) dateEl.addEventListener('change', e => newTransaction.date = e.target.value);
+            //const typeEl = document.getElementById('type');
+            //if(typeEl) {
+            //    typeEl.addEventListener('change', e => {
+            //        newTransaction.type = e.target.value;
+            //        // re-render so category options update
+            //        render();
+            //    });
+            //}
             const typeEl = document.getElementById('type');
-            if(typeEl) {
+            if (typeEl) {
                 typeEl.addEventListener('change', e => {
                     newTransaction.type = e.target.value;
-                    // re-render so category options update
-                    render();
+                    
+                    // Update category dropdown without re-rendering entire UI
+                    const catEl = document.getElementById('category');
+                    catEl.innerHTML = '<option value="">Select Category</option>';
+                    
+                    const cats = newTransaction.type === 'income'
+                        ? incomeCategories
+                        : expenseCategories;
+                        
+                    cats.forEach(c => {
+                        const opt = document.createElement('option');
+                        opt.value = c;
+                        opt.textContent = c;
+                        catEl.appendChild(opt);
+                    });
                 });
             }
+
             const catEl = document.getElementById('category');
             if(catEl) catEl.addEventListener('change', e => newTransaction.category = e.target.value);
             const descEl = document.getElementById('description');
